@@ -37,6 +37,11 @@ export const scanRunStatusEnum = pgEnum("scan_run_status", [
   "completed",
   "failed",
 ]);
+// scan_runs is shared by three batch jobs (Phase 9's tuner and the
+// liquid-universe recompute reuse it rather than each getting their own
+// near-identical table — universeSize/symbolsWithSignals are repurposed
+// per type; see lib/tuner-runner.ts and scripts/compute-liquid-universe.ts).
+export const runTypeEnum = pgEnum("run_type", ["scan", "tune", "universe"]);
 export const ingestionStatusEnum = pgEnum("ingestion_status", [
   "pending",
   "success",
@@ -206,6 +211,7 @@ export const signals = pgTable(
 
 export const scanRuns = pgTable("scan_runs", {
   id: serial("id").primaryKey(),
+  runType: runTypeEnum("run_type").notNull().default("scan"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   universeSize: integer("universe_size"),

@@ -1,6 +1,6 @@
 import { and, desc, eq, lte } from "drizzle-orm";
 import { db } from "../../db";
-import { ingestionLog, corporateActions, symbols, scanRuns, dailyBars } from "../../db/schema";
+import { ingestionLog, corporateActions, symbols, strategies, scanRuns, dailyBars } from "../../db/schema";
 
 export interface IngestionLogRow {
   exchange: string;
@@ -30,6 +30,7 @@ export interface CorporateActionReviewRow {
 
 export interface ScanRunRow {
   id: number;
+  runType: string;
   startedAt: string;
   finishedAt: string | null;
   universeSize: number | null;
@@ -41,13 +42,19 @@ export interface ScanRunRow {
 export interface AdminData {
   recentIngestion: IngestionLogRow[];
   pendingActions: CorporateActionReviewRow[];
-  recentScanRuns: ScanRunRow[];
+  recentRuns: ScanRunRow[];
   universeSize: number;
   liquidityThresholdCr: number; // documented default — see compute-liquid-universe.ts
+  symbolsTuned: number;
+  symbolsNoReliablePattern: number;
+  /** Last time scripts/compute-liquid-universe.ts ran against Neon, from its
+   * own scan_runs(run_type='universe') row — see admin/page.tsx's staleness
+   * banner. null if it has never been run against this database. */
+  universeLastComputedAt: string | null;
 }
 
 export async function getAdminData(): Promise<AdminData> {
-  const [ingestionRows, actionRows, scanRunRows, universeCountRows] = await Promise.all([
+  const [ingestionRows, actionRows, scanRunRows, universeCountRows, tuningCountRows, universeRunRows] = await Promise.all([
     db.select().from(ingestionLog).orderBy(desc(ingestionLog.date)).limit(30),
     db
       .select({
@@ -69,9 +76,21 @@ export async function getAdminData(): Promise<AdminData> {
       .where(eq(corporateActions.confirmed, false))
       .orderBy(desc(corporateActions.exDate))
       .limit(15), // kept small deliberately — see the per-row fetch note below
-    db.select().from(scanRuns).orderBy(desc(scanRuns.id)).limit(10),
+    db.select().from(scanRuns).orderBy(desc(scanRuns.id)).limit(15),
     db.select({ id: symbols.id }).from(symbols).where(eq(symbols.isScanUniverse, true)),
+    db.select({ tuning: strategies.tuning }).from(strategies).where(eq(strategies.isDefault, true)),
+    db
+      .select({ finishedAt: scanRuns.finishedAt })
+      .from(scanRuns)
+      .where(and(eq(scanRuns.runType, "universe"), eq(scanRuns.status, "completed")))
+      .orderBy(desc(scanRuns.id))
+      .limit(1),
   ]);
+
+  const symbolsTuned = tuningCountRows.filter((r) => (r.tuning as { status?: string } | null)?.status === "tuned").length;
+  const symbolsNoReliablePattern = tuningCountRows.filter(
+    (r) => (r.tuning as { status?: string } | null)?.status === "no_reliable_pattern"
+  ).length;
 
   // One targeted 2-row query per action (only the exDate bar and the one
   // immediately before it — never the symbol's full history), run in
@@ -112,8 +131,9 @@ export async function getAdminData(): Promise<AdminData> {
       completedAt: r.completedAt?.toString() ?? null,
     })),
     pendingActions,
-    recentScanRuns: scanRunRows.map((r) => ({
+    recentRuns: scanRunRows.map((r) => ({
       id: r.id,
+      runType: r.runType,
       startedAt: r.startedAt.toString(),
       finishedAt: r.finishedAt?.toString() ?? null,
       universeSize: r.universeSize,
@@ -123,5 +143,8 @@ export async function getAdminData(): Promise<AdminData> {
     })),
     universeSize: universeCountRows.length,
     liquidityThresholdCr: 1.0,
+    symbolsTuned,
+    symbolsNoReliablePattern,
+    universeLastComputedAt: universeRunRows[0]?.finishedAt?.toString() ?? null,
   };
 }

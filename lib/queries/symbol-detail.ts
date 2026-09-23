@@ -60,6 +60,19 @@ export interface SummaryStats {
   pValue: number | null;
 }
 
+export interface TuningInfo {
+  status: "tuned" | "no_reliable_pattern" | "not_run";
+  combinationsSearched: number | null;
+  pValue: number | null;
+  oosAgrees: boolean | null;
+  trainSignalCount: number | null;
+  trainMedianReturn: number | null;
+  testSignalCount: number | null;
+  testMedianReturn: number | null;
+  splitDate: string | null;
+  tunedAt: string | null;
+}
+
 export interface WhatDidntWorkResult {
   label: string;
   description: string;
@@ -89,12 +102,30 @@ export interface SymbolDetailData {
   };
   strategyParams: StrategyParams | null;
   strategyIsTuned: boolean;
+  tuning: TuningInfo;
+  /** Live default-params performance, for CLAUDE.md §9.2's side-by-side —
+   * only populated when the current strategy is actually tuned (comparing
+   * default against itself would be pointless). */
+  defaultComparison: SummaryStats | null;
   signals: PersistedSignalRow[];
   summary: SummaryStats;
   chartBars: ChartBar[];
   whatDidntWork: WhatDidntWorkResult[];
   notFound: boolean;
 }
+
+const NOT_RUN_TUNING: TuningInfo = {
+  status: "not_run",
+  combinationsSearched: null,
+  pValue: null,
+  oosAgrees: null,
+  trainSignalCount: null,
+  trainMedianReturn: null,
+  testSignalCount: null,
+  testMedianReturn: null,
+  splitDate: null,
+  tunedAt: null,
+};
 
 function maxDrawdown(equityCurve: { equity: number }[]): number | null {
   if (equityCurve.length === 0) return null;
@@ -119,6 +150,8 @@ export async function getSymbolDetail(exchange: string, symbol: string): Promise
       dataQuality: { corporateActions: [], hasUnconfirmed: false, firstBarDate: null, lastBarDate: null },
       strategyParams: null,
       strategyIsTuned: false,
+      tuning: NOT_RUN_TUNING,
+      defaultComparison: null,
       signals: [],
       summary: { count: 0, meanReturn: null, medianReturn: null, winRate: null, maxDrawdown: null, randomBaselineMean: null, randomBaselineWinRate: null, pValue: null },
       chartBars: [],
@@ -144,6 +177,23 @@ export async function getSymbolDetail(exchange: string, symbol: string): Promise
   }
 
   const params: StrategyParams = (strategy?.params as StrategyParams | undefined) ?? DEFAULT_STRATEGY_PARAMS;
+
+  const rawTuning = strategy?.tuning as Omit<TuningInfo, "status"> & { status?: "tuned" | "no_reliable_pattern" } | null;
+  const tuning: TuningInfo = rawTuning
+    ? {
+        status: rawTuning.status ?? "not_run",
+        combinationsSearched: rawTuning.combinationsSearched ?? null,
+        pValue: rawTuning.pValue ?? null,
+        oosAgrees: rawTuning.oosAgrees ?? null,
+        trainSignalCount: rawTuning.trainSignalCount ?? null,
+        trainMedianReturn: rawTuning.trainMedianReturn ?? null,
+        testSignalCount: rawTuning.testSignalCount ?? null,
+        testMedianReturn: rawTuning.testMedianReturn ?? null,
+        splitDate: rawTuning.splitDate ?? null,
+        tunedAt: rawTuning.tunedAt ?? null,
+      }
+    : NOT_RUN_TUNING;
+  const strategyIsTuned = tuning.status === "tuned";
 
   let signalRows: PersistedSignalRow[] = [];
   let summary: SummaryStats = {
@@ -220,6 +270,36 @@ export async function getSymbolDetail(exchange: string, symbol: string): Promise
     }
   }
 
+  // CLAUDE.md §9.2: "The detail page shows default-params performance and
+  // tuned performance side by side, so the user can judge how much of the
+  // improvement is real." `summary` above already reflects whatever the
+  // current strategy is (tuned or not); when it IS tuned, also compute the
+  // untouched-default variant live — cheap, bars are already in memory —
+  // rather than persisting a second copy that would need its own upkeep.
+  let defaultComparison: SummaryStats | null = null;
+  if (strategyIsTuned) {
+    const defaultSignals = detectSignals(bars, DEFAULT_STRATEGY_PARAMS);
+    const defaultTrades = defaultSignals
+      .map((s) => simulateTrade(bars, s, DEFAULT_STRATEGY_PARAMS.execution, DEFAULT_STRATEGY_PARAMS.costs))
+      .filter((t): t is NonNullable<typeof t> => t !== null);
+    const defaultBasic = computeBasicMetrics(defaultTrades);
+    const defaultRandomBaseline = computeRandomBaseline(bars, defaultSignals.length, DEFAULT_STRATEGY_PARAMS.execution, DEFAULT_STRATEGY_PARAMS.costs);
+    const defaultP =
+      defaultSignals.length > 0
+        ? permutationTest(bars, defaultBasic.meanReturn ?? 0, defaultSignals.length, DEFAULT_STRATEGY_PARAMS.execution, DEFAULT_STRATEGY_PARAMS.costs, 2000)
+        : null;
+    defaultComparison = {
+      count: defaultSignals.length,
+      meanReturn: defaultBasic.meanReturn,
+      medianReturn: defaultBasic.medianReturn,
+      winRate: defaultBasic.winRate,
+      maxDrawdown: maxDrawdown(defaultBasic.equityCurve),
+      randomBaselineMean: defaultRandomBaseline.meanReturn,
+      randomBaselineWinRate: defaultRandomBaseline.winRate,
+      pValue: defaultP,
+    };
+  }
+
   // "What didn't work" — CLAUDE.md §10.2 point 6 / §2.3. Reuses the same
   // pure engine with different parameter presets, not bespoke detectors, so
   // this stays consistent with the main pattern's logic by construction.
@@ -286,7 +366,9 @@ export async function getSymbolDetail(exchange: string, symbol: string): Promise
       lastBarDate: lastBar?.date ?? null,
     },
     strategyParams: params,
-    strategyIsTuned: !!strategy?.tuning,
+    strategyIsTuned,
+    tuning,
+    defaultComparison,
     signals: signalRows,
     summary,
     chartBars: bars.map((b) => ({

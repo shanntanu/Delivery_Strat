@@ -32,7 +32,7 @@ import "dotenv/config";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { localDb } from "../db/local";
 import { db as neonDb } from "../db";
-import { symbols, dailyBars } from "../db/schema";
+import { symbols, dailyBars, scanRuns } from "../db/schema";
 import { median } from "../lib/engine/baseline";
 import type { Exchange } from "../lib/ingest/types";
 
@@ -72,6 +72,16 @@ interface LocalSymbol {
 async function main() {
   const { exchange, minTurnoverCr, prune } = parseArgs();
   console.log(`Computing liquid universe for ${exchange}, threshold ₹${minTurnoverCr}cr median turnover over ${LOOKBACK_DAYS} days`);
+
+  // Recorded in Neon (not local) so the deployed Admin page — which only
+  // ever reads Neon — can show when this last ran and warn if it's gone
+  // stale. This script is the only thing that can run it (needs the local
+  // archive), so without this record Admin would have no way to know.
+  const startedAt = new Date();
+  const [run] = await neonDb
+    .insert(scanRuns)
+    .values({ runType: "universe", startedAt, status: "running", paramsSnapshot: { exchange, minTurnoverCr, prune } })
+    .returning();
 
   const localSymbols: LocalSymbol[] = await localDb
     .select({ id: symbols.id, symbol: symbols.symbol, series: symbols.series, isin: symbols.isin, name: symbols.name, firstSeen: symbols.firstSeen, lastSeen: symbols.lastSeen })
@@ -194,6 +204,17 @@ async function main() {
     console.log(`${allFailed.length} symbol(s) hit a failure somewhere: ${allFailed.join(", ")}`);
     console.log("Re-run the same command — each pass only redoes what's still needed.");
   }
+
+  await neonDb
+    .update(scanRuns)
+    .set({
+      finishedAt: new Date(),
+      universeSize: unchanged + toPromote.length, // total liquid post-run, not total local symbols
+      symbolsWithSignals: promoted, // reusing this column's meaning for run_type='universe'; see db/schema.ts
+      status: "completed",
+      paramsSnapshot: { exchange, minTurnoverCr, prune, promoted, pruned, unchanged, failed: allFailed.length },
+    })
+    .where(eq(scanRuns.id, run.id));
 }
 
 async function promoteSymbolHistory(localSymbolId: number, exchange: Exchange, symbol: string, series: string) {

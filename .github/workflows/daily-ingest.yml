@@ -18,12 +18,19 @@ jobs:
       - run: npm run ingest:daily
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      # CLAUDE.md §12 point 6: ingestion is followed by the scan. Measured
-      # at ~75-80 minutes for the full NSE liquid universe (1,857 symbols)
-      # against Neon in testing — comfortably under GitHub's per-job time
-      # limit, but worth knowing if you're on a private repo's free Actions
-      # minutes budget (a private repo gets 2,000 min/month; this alone is
-      # roughly 1,600-1,800 min/month running daily on weekdays).
+      # CLAUDE.md §12 point 6: ingestion is followed by the scan. Originally
+      # measured at ~75-80 minutes for the full NSE liquid universe (1,857
+      # symbols) against Neon, run fully sequentially. lib/scan-runner.ts now
+      # scans SCAN_CONCURRENCY (6) symbols at once — Neon's HTTP driver has
+      # no per-connection state to protect, so this is safe — which should
+      # cut wall-clock meaningfully, though it hasn't been re-measured
+      # end-to-end against the full universe (that run alone costs real
+      # Actions minutes / wall time to verify). Comfortably under GitHub's
+      # per-job time limit either way, but worth knowing if you're on a
+      # private repo's free Actions minutes budget (2,000 min/month) — the
+      # pre-concurrency figure alone was roughly 1,600-1,800 min/month
+      # running daily on weekdays. See .github/workflows/weekly-tune.yml's
+      # header comment for the other half of this budget conversation.
       - run: npm run scan -- --exchange NSE
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

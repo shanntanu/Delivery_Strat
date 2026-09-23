@@ -1,0 +1,37 @@
+name: Weekly tuner
+
+# CLAUDE.md §9 / Phase 9. Deliberately a SEPARATE, weekly workflow rather
+# than a third step tacked onto daily-ingest.yml. Two reasons:
+#
+# 1. Correctness: tuned params are a per-symbol structural fit over ~5 years
+#    of history. One more day of bars essentially never changes what the
+#    best grid cell is — there's no reason to re-search daily.
+# 2. Actions-minutes budget: the daily scan alone was estimated at roughly
+#    1,600-1,800 min/month on a private repo's 2,000 min/month free
+#    allowance (see daily-ingest.yml). The tuner runs a ~162-cell grid search
+#    per symbol, which is intrinsically heavier per-symbol than a single
+#    scan pass — adding that as a fourth daily step would blow the budget
+#    outright on a private repo. Weekly keeps it a small fraction of the
+#    same budget instead of compounding the problem.
+#
+# If this repo is public, GitHub Actions minutes are unmetered and this
+# constraint doesn't apply — feel free to move this to daily. It's kept
+# separate either way, since correctness reason #1 still holds.
+on:
+  schedule:
+    # Saturday, after Friday's close has been ingested and scanned.
+    - cron: "0 16 * * 6"
+  workflow_dispatch: {}
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run tune -- --exchange NSE
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

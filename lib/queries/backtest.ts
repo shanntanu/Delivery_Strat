@@ -35,7 +35,7 @@ export async function getBacktestPageData(exchange: string, symbol: string): Pro
       name: r.name,
       isDefault: r.isDefault,
       isActive: r.isActive,
-      isTuned: !!r.tuning,
+      isTuned: (r.tuning as { status?: string } | null)?.status === "tuned",
     })),
     dataFrom: sym.firstSeen,
     dataTo: sym.lastSeen,

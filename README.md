@@ -103,6 +103,26 @@ npm run detect-actions -- --exchange NSE --db neon
 Unconfirmed detections still get applied (CLAUDE.md §6.3) — review them at
 `/admin` (confirm, correct the ratio/type, reject, or add one manually).
 
+## Tuner (Phase 9)
+
+```bash
+npm run tune -- --exchange NSE
+```
+
+Runs CLAUDE.md §9's grid search for every symbol in the scan universe that
+already has a default strategy (run `npm run scan` first — the tuner has
+nothing to tune otherwise). For each symbol, this **overwrites that symbol's
+one default strategy row in place**: if a grid cell clears the ≥8-signal bar,
+the row becomes `name: "Tuned"` with the best params and a `tuning` JSON
+recording the p-value, out-of-sample agreement, and combinations searched; if
+none does, the row reverts to (or stays at) `name: "Default"` with
+`tuning.status = "no_reliable_pattern"`. Either way the symbol's persisted
+`signals` are recomputed under whatever params are now current, so every
+other query (dashboard, symbol detail, backtest) just reads "the default
+strategy" without needing to know tuning happened. Also runnable from
+`/admin` (fire-and-forget, same caveats as the scan trigger) or on a schedule
+via `.github/workflows/weekly-tune.yml`.
+
 ## Running the app locally
 
 ```bash
@@ -129,14 +149,27 @@ always happen elsewhere (GitHub Actions, or your own machine).
    behind HTTP Basic Auth (see `middleware.ts`) — recommended once deployed,
    since Admin can confirm/reject corporate actions and trigger scans.
 3. **GitHub Actions**: push this repo to GitHub, then add `DATABASE_URL` as a
-   repository secret (Settings → Secrets and variables → Actions). The
-   `daily-ingest.yml` workflow runs weekdays at 14:00 UTC (19:30 IST):
-   ingest, then scan (per CLAUDE.md §12 point 6) — both against Neon only.
-   You can also trigger it manually via the Actions tab (`workflow_dispatch`).
-4. The **Admin scan-trigger button** (`/admin`) is a local-dev convenience
-   only — it runs the scan in-process and can take ~an hour, which exceeds
-   any serverless function's timeout. Don't rely on it once deployed; use
-   the GitHub Actions workflow (scheduled or manually dispatched) instead.
+   repository secret (Settings → Secrets and variables → Actions). Two
+   scheduled workflows, both against Neon only:
+   - `daily-ingest.yml` — weekdays at 14:00 UTC (19:30 IST): ingest, then
+     scan (CLAUDE.md §12 point 6).
+   - `weekly-tune.yml` — Saturdays: runs the Phase 9 tuner. Deliberately
+     weekly, not daily — see that file's header comment for why (tuned
+     params don't need daily refresh, and a private repo's free Actions
+     minutes budget is already mostly spent by the daily scan).
+   Both are also runnable on demand via the Actions tab (`workflow_dispatch`).
+4. **Actions minutes budget, if this repo is private**: a private repo gets
+   2,000 free minutes/month. The daily scan (`lib/scan-runner.ts` now scans
+   6 symbols concurrently to keep this down) and weekly tune both cost real
+   wall-clock time against ~1,850 NSE symbols — if you're tight on budget,
+   either make the repo public (unlimited minutes) or reduce the daily
+   schedule to weekdays-only (already the default) and consider a coarser
+   tune cadence than weekly.
+5. The **Admin scan/tuner trigger buttons** (`/admin`) are a local-dev
+   convenience only — they run in-process and can take a long time, which
+   exceeds any serverless function's timeout. Don't rely on them once
+   deployed; use the GitHub Actions workflows (scheduled or manually
+   dispatched) instead.
 
 ## Environment variables
 
@@ -157,7 +190,12 @@ always happen elsewhere (GitHub Actions, or your own machine).
 - `scripts/ingest-daily.ts` — one-date incremental ingestion, run by GitHub Actions (Neon only)
 - `scripts/compute-liquid-universe.ts` — decides + syncs the liquid subset, promotes history to Neon
 - `scripts/detect-corporate-actions.ts` — corporate action detection (`--db local|neon`)
+- `scripts/scan.ts` / `lib/scan-runner.ts` — Phase 5 scan (default params, all symbols)
+- `scripts/tune.ts` / `lib/tuner-runner.ts` — Phase 9 per-symbol tuner (see "Tuner" above)
+- `lib/signal-persistence.ts` — shared "detect + simulate + persist" step used by both runners
+- `lib/concurrency.ts` — bounded-concurrency map used by both runners to keep wall-clock (and GitHub Actions minutes) down
 - `scripts/spike/` — throwaway Phase 1 scripts that confirmed the data sources; not used by the app
 - `.github/workflows/daily-ingest.yml` — scheduled daily ingestion + scan
+- `.github/workflows/weekly-tune.yml` — scheduled weekly tuner run
 - `middleware.ts` — gates `/admin` behind `ADMIN_PASSWORD` if set
 - `app/`, `components/`, `lib/queries/`, `lib/engine/` — the dashboard, symbol detail, strategy editor, backtest, and admin pages, and the pure analysis engine they all share

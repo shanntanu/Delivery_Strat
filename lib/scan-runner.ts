@@ -1,14 +1,20 @@
 // Shared scan orchestration — used by both scripts/scan.ts (CLI) and the
 // Admin page's scan-trigger action, so there's exactly one implementation.
 import { and, eq, sql } from "drizzle-orm";
-import { symbols, strategies, signals, scanRuns } from "../db/schema";
+import { symbols, strategies, scanRuns } from "../db/schema";
 import { getAdjustedBarsFrom } from "./corporate-actions/loader";
-import { detectSignals } from "./engine/detect";
-import { simulateTrade } from "./engine/simulate";
+import { persistSignals } from "./signal-persistence";
 import { DEFAULT_STRATEGY_PARAMS } from "./engine/types";
 import { withRetry } from "./ingest/retry";
+import { mapWithConcurrency } from "./concurrency";
 import type { DbClient } from "./ingest/db-client";
 import type { Exchange } from "./ingest/types";
+
+// Symbols are independent (separate rows, separate signal sets) and Neon's
+// HTTP driver has no per-connection state, so running several at once is
+// safe. This is also the main lever on GitHub Actions wall-clock cost — see
+// .github/workflows/daily-ingest.yml.
+const SCAN_CONCURRENCY = 6;
 
 async function ensureDefaultStrategy(db: DbClient, symbolId: number): Promise<number> {
   // A separate check-then-insert (SELECT existing, INSERT if none) isn't
@@ -29,80 +35,13 @@ async function ensureDefaultStrategy(db: DbClient, symbolId: number): Promise<nu
   return row.id;
 }
 
-// baseline_delivery/baseline_trades are `bigint` columns; after
-// corporate-action adjustment (fractional factors) the computed baseline can
-// land on a non-integer. Postgres rejects a float bound to bigint outright.
-function roundOrNull(v: number | null): number | null {
-  return v === null ? null : Math.round(v);
-}
-
 async function scanSymbol(db: DbClient, symbolId: number): Promise<number> {
   const { bars } = await getAdjustedBarsFrom(db, symbolId);
   if (bars.length < 30) return 0;
 
-  const detected = detectSignals(bars, DEFAULT_STRATEGY_PARAMS);
   const strategyId = await ensureDefaultStrategy(db, symbolId);
-  if (detected.length === 0) return 0;
-
-  for (const s of detected) {
-    const trade = simulateTrade(bars, s, DEFAULT_STRATEGY_PARAMS.execution, DEFAULT_STRATEGY_PARAMS.costs);
-    const values = {
-      symbolId,
-      strategyId,
-      signalDate: s.signalDate,
-      windowStart: s.windowStart,
-      windowEnd: s.windowEnd,
-      avgRatio: s.avgRatio.toString(),
-      minRatio: s.minRatio.toString(),
-      tradesRatio: s.tradesRatio?.toString() ?? null,
-      priceChangePct: s.priceChangePct.toString(),
-      upDays: s.upDays,
-      avgDeliveryPct: s.avgDeliveryPct?.toString() ?? null,
-      baselineDelivery: roundOrNull(s.baselineDelivery),
-      baselineTrades: roundOrNull(s.baselineTrades),
-      entryPrice: trade?.entryPrice.toString() ?? null,
-      fwd1: trade?.fwd1?.toString() ?? null,
-      fwd3: trade?.fwd3?.toString() ?? null,
-      fwd5: trade?.fwd5?.toString() ?? null,
-      fwd10: trade?.fwd10?.toString() ?? null,
-      fwd20: trade?.fwd20?.toString() ?? null,
-      mfe10: trade?.mfe?.toString() ?? null,
-      mae10: trade?.mae?.toString() ?? null,
-      exitReason: trade?.exitReason ?? null,
-      realizedReturn: trade?.realizedReturn?.toString() ?? null,
-    };
-
-    await db
-      .insert(signals)
-      .values(values)
-      .onConflictDoUpdate({
-        target: [signals.symbolId, signals.strategyId, signals.signalDate],
-        set: {
-          windowStart: values.windowStart,
-          windowEnd: values.windowEnd,
-          avgRatio: values.avgRatio,
-          minRatio: values.minRatio,
-          tradesRatio: values.tradesRatio,
-          priceChangePct: values.priceChangePct,
-          upDays: values.upDays,
-          avgDeliveryPct: values.avgDeliveryPct,
-          baselineDelivery: values.baselineDelivery,
-          baselineTrades: values.baselineTrades,
-          entryPrice: values.entryPrice,
-          fwd1: values.fwd1,
-          fwd3: values.fwd3,
-          fwd5: values.fwd5,
-          fwd10: values.fwd10,
-          fwd20: values.fwd20,
-          mfe10: values.mfe10,
-          mae10: values.mae10,
-          exitReason: values.exitReason,
-          realizedReturn: values.realizedReturn,
-        },
-      });
-  }
-
-  return detected.length;
+  const { count } = await persistSignals(db, symbolId, strategyId, bars, DEFAULT_STRATEGY_PARAMS);
+  return count;
 }
 
 export interface ScanProgress {
@@ -143,19 +82,22 @@ export async function runScan(
     let symbolsWithSignals = 0;
     let totalSignals = 0;
     const failed: string[] = [];
+    let completed = 0;
 
-    for (const [i, sym] of symbolRows.entries()) {
+    await mapWithConcurrency(symbolRows, SCAN_CONCURRENCY, async (sym) => {
       try {
         const count = await withRetry(() => scanSymbol(db, sym.id));
         if (count > 0) {
           symbolsWithSignals++;
           totalSignals += count;
         }
-        onProgress?.({ index: i + 1, total: symbolRows.length, symbol: sym.symbol, signalCount: count });
+        completed++;
+        onProgress?.({ index: completed, total: symbolRows.length, symbol: sym.symbol, signalCount: count });
       } catch (e) {
+        completed++;
         failed.push(sym.symbol);
       }
-    }
+    });
 
     await withRetry(async () => {
       await db

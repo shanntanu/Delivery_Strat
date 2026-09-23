@@ -29,7 +29,7 @@ export default async function SymbolDetailPage({
 
   if (data.notFound) notFound();
 
-  const { header, dataQuality, strategyParams, strategyIsTuned, signals, summary, chartBars, whatDidntWork } = data;
+  const { header, dataQuality, strategyParams, strategyIsTuned, tuning, defaultComparison, signals, summary, chartBars, whatDidntWork } = data;
 
   return (
     <div className="space-y-4">
@@ -134,6 +134,69 @@ export default async function SymbolDetailPage({
               saved tuning run.
             </p>
           </>
+        )}
+
+        {tuning.status === "no_reliable_pattern" && (
+          <div className="mt-3 rounded border border-[var(--color-grey)]/40 bg-[var(--color-grey)]/10 px-3 py-2 text-xs">
+            Tuner ran ({tuning.combinationsSearched} combinations searched) and found no grid cell with at least 8
+            signals in the training window — CLAUDE.md §9.1 refuses to emit a strategy in that case. This symbol is
+            running the untouched default parameters, not a tuned fit.
+          </div>
+        )}
+
+        {tuning.status === "tuned" && (
+          <div className="mt-3 space-y-2">
+            <div className="grid grid-cols-2 gap-4 rounded border border-[var(--color-border)] p-3 text-xs sm:grid-cols-4">
+              <Stat label="Combinations searched" value={String(tuning.combinationsSearched)} />
+              <Stat label="Train median (first 70%)" value={fmtPct(tuning.trainMedianReturn)} />
+              <Stat label="Test median (last 30%, OOS)" value={fmtPct(tuning.testMedianReturn)} />
+              <Stat
+                label="OOS agreement"
+                value={tuning.oosAgrees ? "agrees" : "sign flip"}
+              />
+            </div>
+            {!tuning.oosAgrees && (
+              <div className="rounded border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs">
+                Out-of-sample sign flip: the tuned parameters' return sign differs between the training split (first
+                70% of history) and the untouched last 30%. Per CLAUDE.md §9.1, treat this tuned result as likely
+                overfit to the training window rather than a real edge.
+              </div>
+            )}
+            {defaultComparison && (
+              <div className="overflow-x-auto rounded border border-[var(--color-border)]">
+                <table className="w-full text-xs">
+                  <thead className="bg-[var(--color-bg)]">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left font-medium text-[var(--color-text-muted)]">Variant</th>
+                      <th className="px-2 py-1.5 text-left font-medium text-[var(--color-text-muted)]">Signals</th>
+                      <th className="px-2 py-1.5 text-left font-medium text-[var(--color-text-muted)]">Median</th>
+                      <th className="px-2 py-1.5 text-left font-medium text-[var(--color-text-muted)]">Mean</th>
+                      <th className="px-2 py-1.5 text-left font-medium text-[var(--color-text-muted)]">Win rate</th>
+                      <th className="px-2 py-1.5 text-left font-medium text-[var(--color-text-muted)]">p-value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-t border-[var(--color-border)]">
+                      <td className="px-2 py-1.5 text-[var(--color-text-muted)]">Default (untouched)</td>
+                      <td className="px-2 py-1.5">{defaultComparison.count}</td>
+                      <td className="px-2 py-1.5">{fmtPct(defaultComparison.medianReturn)}</td>
+                      <td className="px-2 py-1.5">{fmtPct(defaultComparison.meanReturn)}</td>
+                      <td className="px-2 py-1.5">{defaultComparison.winRate !== null ? `${defaultComparison.winRate.toFixed(0)}%` : "—"}</td>
+                      <td className="px-2 py-1.5">{defaultComparison.pValue !== null ? defaultComparison.pValue.toFixed(4) : "—"}</td>
+                    </tr>
+                    <tr className="border-t border-[var(--color-border)] font-medium">
+                      <td className="px-2 py-1.5">Tuned (current)</td>
+                      <td className="px-2 py-1.5">{summary.count}</td>
+                      <td className="px-2 py-1.5">{fmtPct(summary.medianReturn)}</td>
+                      <td className="px-2 py-1.5">{fmtPct(summary.meanReturn)}</td>
+                      <td className="px-2 py-1.5">{summary.winRate !== null ? `${summary.winRate.toFixed(0)}%` : "—"}</td>
+                      <td className="px-2 py-1.5">{summary.pValue !== null ? summary.pValue.toFixed(4) : "—"}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
       </Card>
 

@@ -32,7 +32,17 @@ export interface DashboardHeaderStats {
   lastScanFinishedAt: string | null;
 }
 
-function computeBadge(signalCount: number, pValue: number | null, oosAgrees: boolean | null): { badge: ReliabilityBadge; partial: boolean } {
+function computeBadge(
+  signalCount: number,
+  pValue: number | null,
+  oosAgrees: boolean | null,
+  tuningStatus: "tuned" | "no_reliable_pattern" | null
+): { badge: ReliabilityBadge; partial: boolean } {
+  // The tuner ran and refused to emit a strategy (CLAUDE.md §9.1: fewer than
+  // 8 signals in the best grid cell). This is a fully-determined negative
+  // result, not a missing one — grey, and NOT flagged partial.
+  if (tuningStatus === "no_reliable_pattern") return { badge: "grey", partial: false };
+
   const hasFullStats = pValue !== null && oosAgrees !== null;
 
   if (hasFullStats) {
@@ -99,10 +109,10 @@ export async function getDashboardRows(exchange: "NSE" | "BSE" = "NSE"): Promise
 
   const rows: DashboardRow[] = (perSymbol.rows as Record<string, unknown>[]).map((r) => {
     const signalCount = Number(r.signal_count);
-    const tuning = r.tuning as { p_value?: number; oos_agrees?: boolean } | null;
-    const pValue = tuning?.p_value ?? null;
-    const oosAgrees = tuning?.oos_agrees ?? null;
-    const { badge, partial } = computeBadge(signalCount, pValue, oosAgrees);
+    const tuning = r.tuning as { status?: "tuned" | "no_reliable_pattern"; pValue?: number; oosAgrees?: boolean } | null;
+    const pValue = tuning?.pValue ?? null;
+    const oosAgrees = tuning?.oosAgrees ?? null;
+    const { badge, partial } = computeBadge(signalCount, pValue, oosAgrees, tuning?.status ?? null);
     const lastSignalDate = (r.last_signal_date as string | null) ?? null;
 
     return {

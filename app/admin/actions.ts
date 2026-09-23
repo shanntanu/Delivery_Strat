@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db";
 import { corporateActions, symbols } from "../../db/schema";
 import { runScan } from "../../lib/scan-runner";
+import { runTuner } from "../../lib/tuner-runner";
 import type { Exchange } from "../../lib/ingest/types";
 
 export async function confirmCorporateAction(id: number): Promise<void> {
@@ -79,6 +80,19 @@ export async function addManualCorporateAction(
 export async function triggerScan(exchange: Exchange): Promise<{ started: boolean }> {
   runScan(db, exchange).catch((e) => {
     console.error(`Background scan (${exchange}) failed:`, e);
+  });
+  return { started: true };
+}
+
+/**
+ * Same fire-and-forget shape as triggerScan, for CLAUDE.md §9's tuner.
+ * Requires the scan to have already run for the target exchange — the
+ * tuner only touches symbols that already have a default strategy row
+ * (lib/tuner-runner.ts's tuneSymbol skips anything else).
+ */
+export async function triggerTune(exchange: Exchange): Promise<{ started: boolean }> {
+  runTuner(db, exchange).catch((e) => {
+    console.error(`Background tune (${exchange}) failed:`, e);
   });
   return { started: true };
 }

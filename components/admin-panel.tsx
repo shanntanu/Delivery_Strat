@@ -8,6 +8,7 @@ import {
   correctCorporateAction,
   addManualCorporateAction,
   triggerScan,
+  triggerTune,
 } from "../app/admin/actions";
 import type { CorporateActionReviewRow } from "../lib/queries/admin";
 
@@ -113,6 +114,10 @@ export function AdminPanel({ pendingActions }: { pendingActions: CorporateAction
   const [scanStarted, setScanStarted] = useState(false);
   const [isTriggering, startTrigger] = useTransition();
 
+  const [tuneExchange, setTuneExchange] = useState<"NSE" | "BSE">("NSE");
+  const [tuneStarted, setTuneStarted] = useState(false);
+  const [isTuning, startTuneTrigger] = useTransition();
+
   return (
     <div className="space-y-6">
       <section>
@@ -189,6 +194,36 @@ export function AdminPanel({ pendingActions }: { pendingActions: CorporateAction
             {isTriggering ? "Starting…" : "Trigger scan"}
           </button>
           {scanStarted && <span className="text-xs text-[var(--color-green)]">Started — see scan run history below.</span>}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Tuner trigger</h2>
+        <div className="rounded border border-[var(--color-amber)]/30 bg-[var(--color-amber)]/10 p-3 text-xs">
+          CLAUDE.md §9 — searches a fixed grid per symbol against the first 70% of history, refusing to emit a
+          strategy below 8 signals. Only touches symbols that already have a default strategy (run the scan first).
+          Dev-time convenience, same caveats as the scan trigger above — production runs this via a scheduled GitHub
+          Actions workflow (weekly, not daily — see .github/workflows/weekly-tune.yml).
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <select className={inputClass + " w-32"} value={tuneExchange} onChange={(e) => setTuneExchange(e.target.value as "NSE" | "BSE")}>
+            <option value="NSE">NSE</option>
+            <option value="BSE">BSE</option>
+          </select>
+          <button
+            disabled={isTuning}
+            onClick={() =>
+              startTuneTrigger(async () => {
+                await triggerTune(tuneExchange);
+                setTuneStarted(true);
+                setTimeout(() => router.refresh(), 3000);
+              })
+            }
+            className="rounded bg-[var(--color-green)] px-3 py-1.5 text-sm font-medium text-black disabled:opacity-40"
+          >
+            {isTuning ? "Starting…" : "Trigger tuner"}
+          </button>
+          {tuneStarted && <span className="text-xs text-[var(--color-green)]">Started — see run history below.</span>}
         </div>
       </section>
     </div>

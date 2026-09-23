@@ -94,12 +94,23 @@ This means the scan universe (§4.3) is no longer just a query-time filter —
 it now also gates what data physically exists in Neon. See DATA_SOURCES.md
 and README.md for the operational details.
 
+**Decision update (2026-09-23): plain Tailwind, not shadcn/ui.** All of
+Phase 6's pages (§10.1–§10.5) shipped as plain Tailwind utility classes with
+hand-written components, not shadcn/ui's generated component set. Nothing
+in the UI needed shadcn's specific primitives (its component set is mostly
+useful for things like dialogs, comboboxes, and form-kit patterns this app
+doesn't have), and by the time this was noticed the pages were already
+built, tested against real data, and working — retrofitting shadcn in would
+mean re-scaffolding working components for a styling-system change with no
+user-facing benefit. Not revisited unless a future page genuinely needs a
+primitive shadcn provides that plain Tailwind makes awkward.
+
 ### 3.1 Stack
 
 | Layer | Choice | Rationale |
 |---|---|---|
 | Framework | Next.js 15, App Router, TypeScript | One deploy target, server components keep the client thin |
-| Styling | Tailwind + shadcn/ui | Fast, no design work needed |
+| Styling | Tailwind (plain utility classes) | See decision note below |
 | Charts | Recharts | Adequate for equity curves and price/delivery overlays |
 | DB | Postgres on Neon (serverless, free tier) | Branching, scales to zero, works with Vercel out of the box |
 | ORM | Drizzle | Typed, lightweight, good migrations |
@@ -305,6 +316,18 @@ After the scan, optionally tune parameters per symbol. This is the feature most 
 
 Tuned strategies are badged distinctly from default strategies. The detail page shows default-params performance and tuned performance side by side, so the user can judge how much of the improvement is real.
 
+### 9.3 Implementation note (added 2026-09-23, wiring the tuner into persistence)
+
+This section doesn't fully specify how "tuning a symbol" maps onto the schema — recorded here since it's a non-obvious decision, per §14's standing note to update this file rather than leave it implicit:
+
+There is exactly one strategy row per symbol with `is_default = true` (enforced by `strategies_one_default_per_symbol`, §5/§6-adjacent history). Tuning does **not** create a second row. `lib/tuner-runner.ts` overwrites that row's `params` with the best grid cell found, renames it `"Tuned"`, and records the full diagnostic trail (p-value, OOS train/test medians and signal counts, sign-flip flag, combinations searched) in its `tuning` jsonb column. If no cell clears the ≥8-signal bar, the row is left at (or reverted to) `DEFAULT_STRATEGY_PARAMS` named `"Default"`, with `tuning.status = "no_reliable_pattern"` — so a symbol that stops qualifying on a later re-tune correctly falls back instead of keeping stale tuned params forever. Either way, the symbol's persisted `signals` are recomputed for whichever params are now current (`lib/signal-persistence.ts`), so the dashboard/symbol-detail/backtest queries — which all just read "the default strategy" — see consistent results without needing separate tuned-strategy plumbing.
+
+The p-value surfaced on the dashboard badge (§10.1) is computed against the **full** history under the tuned params (≥5,000 permutations per §8.2), not just the training split — it answers "is this pattern real for this symbol", which `oosSignFlip`/`oosAgrees` (train-vs-test sign agreement) already covers separately.
+
+§9.2's "side by side" comparison is computed **live** on the symbol detail page (`lib/queries/symbol-detail.ts`), not persisted: bars are already loaded for the chart, so re-running the pure engine with `DEFAULT_STRATEGY_PARAMS` for comparison is cheap and always consistent with what's actually stored, with no second copy to keep in sync.
+
+Run via `npm run tune -- --exchange NSE`, the `/admin` tuner-trigger button (dev-time only, same caveats as the scan trigger), or `.github/workflows/weekly-tune.yml` (see §12 point 4 for why weekly, not daily).
+
 ---
 
 ## 10. UI
@@ -369,8 +392,10 @@ Additional required tests:
 3. `npx drizzle-kit push` to create the schema.
 4. Locally: `npm run backfill -- --exchange NSE --from 2021-09-21` (expect several hours).
 5. `vercel deploy`. No custom build config, no serverless tuning, no edge functions.
-6. Enable the GitHub Actions workflow for daily ingestion at 19:30 IST (14:00 UTC), followed by the scan.
+6. Enable the GitHub Actions workflow for daily ingestion at 19:30 IST (14:00 UTC), followed by the scan. Enable `weekly-tune.yml` separately (weekly, not daily — see point 8).
 7. Protect write endpoints with an env-var shared secret; use Vercel's built-in password protection for the whole app if desired.
+8. **Actions-minutes budget, if the repo is private.** A private GitHub repo gets 2,000 free Actions minutes/month. The daily scan alone was estimated at ~1,600-1,800 min/month before `lib/scan-runner.ts` was parallelized (§9.3-adjacent — 6 symbols concurrently, since Neon's HTTP driver has no per-connection state to protect); the tuner's weekly cadence (rather than daily) exists specifically so it doesn't compound this. If the repo is public, Actions minutes are unmetered and this constraint doesn't apply.
+9. `scripts/compute-liquid-universe.ts` can only run locally (needs the full local archive) and has no fixed schedule — nothing else can trigger it. Since 2026-09-23 it records a `scan_runs(run_type='universe')` row in Neon on completion, so `/admin` can show when it last ran and warn if it's gone stale (>30 days, a judgment call, not a derived threshold). Re-run it periodically; there's no way to automate this away without giving GitHub Actions access to the local archive, which defeats the reason it isn't there.
 
 Vercel free tier is sufficient because Vercel does no heavy lifting — all computation happens either in GitHub Actions or inside a short server action against pre-computed data.
 

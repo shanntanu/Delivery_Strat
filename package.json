@@ -12,6 +12,7 @@
     "compute-universe": "tsx scripts/compute-liquid-universe.ts",
     "copy-neon-to-local": "tsx scripts/copy-neon-to-local.ts",
     "scan": "tsx scripts/scan.ts",
+    "tune": "tsx scripts/tune.ts",
     "db:generate": "drizzle-kit generate",
     "db:apply": "tsx scripts/apply-migration.ts",
     "typecheck": "tsc --noEmit",

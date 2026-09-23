@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "signals_symbol_strategy_date_unique" ON "signals" USING btree ("symbol_id","strategy_id","signal_date");

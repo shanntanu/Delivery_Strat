@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "strategies_one_default_per_symbol" ON "strategies" USING btree ("symbol_id") WHERE is_default = true;

@@ -1,0 +1,1 @@
+ALTER TABLE "symbols" ADD COLUMN "is_scan_universe" boolean DEFAULT false NOT NULL;

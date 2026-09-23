@@ -1,0 +1,29 @@
+name: Daily ingestion
+
+on:
+  schedule:
+    # 14:00 UTC = 19:30 IST, after market close. CLAUDE.md §12.
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run ingest:daily
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # CLAUDE.md §12 point 6: ingestion is followed by the scan. Measured
+      # at ~75-80 minutes for the full NSE liquid universe (1,857 symbols)
+      # against Neon in testing — comfortably under GitHub's per-job time
+      # limit, but worth knowing if you're on a private repo's free Actions
+      # minutes budget (a private repo gets 2,000 min/month; this alone is
+      # roughly 1,600-1,800 min/month running daily on weekdays).
+      - run: npm run scan -- --exchange NSE
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

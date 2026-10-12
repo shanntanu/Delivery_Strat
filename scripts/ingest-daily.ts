@@ -30,6 +30,7 @@ import { desc, and, eq, gte } from "drizzle-orm";
 import { fetchNseBhavcopy } from "../lib/ingest/nse";
 import { fetchBseBhavcopy } from "../lib/ingest/bse";
 import { upsertDailyBars, recordIngestionFailure, filterToLiquidUniverse } from "../lib/ingest/upsert";
+import { withRetry } from "../lib/ingest/retry";
 import { db } from "../db";
 import { ingestionLog } from "../db/schema";
 import type { Exchange } from "../lib/ingest/types";
@@ -37,6 +38,12 @@ import type { Exchange } from "../lib/ingest/types";
 const OVERLAP_DAYS = 7;
 const NO_DATA_FINAL_AFTER_DAYS = 3;
 const ABORT_AFTER_CONSECUTIVE_FAILURES = 3;
+
+// Neon's HTTP driver makes a fresh HTTPS call per query, so a brief network
+// wobble or a cold-starting free-tier compute surfaces as "fetch failed".
+// 5 tries with 1s/2s/3s/4s backoff rides out those; only DB calls are wrapped
+// (they're idempotent upserts/selects), never the NSE download.
+const dbRetry = <T>(fn: () => Promise<T>) => withRetry(fn, 5, 1000);
 
 function parseArgs() {
   const get = (flag: string) => {
@@ -66,12 +73,14 @@ function* weekdays(from: string, to: string): Generator<string> {
 }
 
 async function planDates(exchange: Exchange, today: string): Promise<string[]> {
-  const [lastSuccess] = await db
-    .select({ date: ingestionLog.date })
-    .from(ingestionLog)
-    .where(and(eq(ingestionLog.exchange, exchange), eq(ingestionLog.status, "success")))
-    .orderBy(desc(ingestionLog.date))
-    .limit(1);
+  const [lastSuccess] = await dbRetry(() =>
+    db
+      .select({ date: ingestionLog.date })
+      .from(ingestionLog)
+      .where(and(eq(ingestionLog.exchange, exchange), eq(ingestionLog.status, "success")))
+      .orderBy(desc(ingestionLog.date))
+      .limit(1)
+  );
 
   if (!lastSuccess) {
     throw new Error(
@@ -80,10 +89,12 @@ async function planDates(exchange: Exchange, today: string): Promise<string[]> {
   }
 
   const windowStart = addDays(lastSuccess.date, -OVERLAP_DAYS);
-  const rows = await db
-    .select({ date: ingestionLog.date, status: ingestionLog.status })
-    .from(ingestionLog)
-    .where(and(eq(ingestionLog.exchange, exchange), gte(ingestionLog.date, windowStart)));
+  const rows = await dbRetry(() =>
+    db
+      .select({ date: ingestionLog.date, status: ingestionLog.status })
+      .from(ingestionLog)
+      .where(and(eq(ingestionLog.exchange, exchange), gte(ingestionLog.date, windowStart)))
+  );
   const statusByDate = new Map(rows.map((r) => [r.date, r.status]));
 
   const plan: string[] = [];
@@ -99,8 +110,8 @@ async function planDates(exchange: Exchange, today: string): Promise<string[]> {
 async function ingestOne(exchange: Exchange, date: string) {
   try {
     const result = exchange === "NSE" ? await fetchNseBhavcopy(date) : await fetchBseBhavcopy(date);
-    const liquidRows = await filterToLiquidUniverse(db, exchange, result.rows);
-    const { rowsIngested } = await upsertDailyBars(db, exchange, date, liquidRows);
+    const liquidRows = await dbRetry(() => filterToLiquidUniverse(db, exchange, result.rows));
+    const { rowsIngested } = await dbRetry(() => upsertDailyBars(db, exchange, date, liquidRows));
     if (result.noData) {
       console.log(`${exchange} ${date}: no data (holiday, or file not published yet)`);
     } else {
@@ -109,7 +120,7 @@ async function ingestOne(exchange: Exchange, date: string) {
   } catch (e) {
     const msg = (e as Error).message;
     console.error(`${exchange} ${date}: FAILED — ${msg}`);
-    await recordIngestionFailure(db, exchange, date, msg);
+    await dbRetry(() => recordIngestionFailure(db, exchange, date, msg));
     throw e;
   }
 }

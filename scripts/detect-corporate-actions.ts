@@ -12,9 +12,15 @@
 //   npm run detect-actions -- --exchange NSE
 //   npm run detect-actions -- --exchange BSE
 //   npm run detect-actions -- --exchange NSE --db neon
+//   npm run detect-actions -- --exchange NSE --db neon --since-days 10
+//
+// --since-days N: only look for actions with an ex-date in the last N days,
+// using ONE bulk query for recent bars instead of one full-history query per
+// symbol. This is what the daily GitHub Actions job runs so a fresh split is
+// caught the same day it's ingested (CLAUDE.md §6: unadjusted splits silently
+// corrupt every ratio), without re-reading 5 years of bars for ~1,850 symbols.
 import "dotenv/config";
-import { asc, eq } from "drizzle-orm";
-import { localDb } from "../db/local";
+import { and, asc, eq, gte } from "drizzle-orm";
 import { db as neonDb } from "../db";
 import { symbols, dailyBars, corporateActions } from "../db/schema";
 import { detectCorporateActions } from "../lib/corporate-actions/detect";
@@ -29,25 +35,47 @@ function parseArgs() {
   }
   const dbIdx = process.argv.indexOf("--db");
   const target = (dbIdx === -1 ? "local" : process.argv[dbIdx + 1]) as "local" | "neon";
-  return { exchange, target };
+  const sIdx = process.argv.indexOf("--since-days");
+  const sinceDays = sIdx === -1 ? null : Number(process.argv[sIdx + 1]);
+  if (sinceDays !== null && (!Number.isFinite(sinceDays) || sinceDays < 1)) {
+    throw new Error("--since-days must be a positive number");
+  }
+  return { exchange, target, sinceDays };
 }
 
-async function processSymbol(db: DbClient, sym: { id: number; symbol: string }) {
-  const bars = await db
-    .select({ date: dailyBars.date, close: dailyBars.close, prevClose: dailyBars.prevClose })
-    .from(dailyBars)
-    .where(eq(dailyBars.symbolId, sym.id))
-    .orderBy(asc(dailyBars.date));
+interface BarForDetection {
+  date: string;
+  close: string | null;
+  prevClose: string | null;
+}
 
-  if (bars.length < 2) return { detectedCount: 0, insertedCount: 0 };
+async function processSymbol(
+  db: DbClient,
+  sym: { id: number; symbol: string },
+  bars?: BarForDetection[],
+  minExDate?: string
+) {
+  const history =
+    bars ??
+    (await db
+      .select({ date: dailyBars.date, close: dailyBars.close, prevClose: dailyBars.prevClose })
+      .from(dailyBars)
+      .where(eq(dailyBars.symbolId, sym.id))
+      .orderBy(asc(dailyBars.date)));
 
+  if (history.length < 2) return { detectedCount: 0, insertedCount: 0 };
+
+  // In --since-days mode the fetched window includes a few older bars purely
+  // as comparison context; only candidates inside the requested window count.
+  // (Rejecting a candidate in Admin deletes its row, so without this cutoff an
+  // old rejected one inside the context bars would be re-inserted every run.)
   const detected = detectCorporateActions(
-    bars.map((b) => ({
+    history.map((b) => ({
       date: b.date,
       close: b.close === null ? null : Number(b.close),
       prevClose: b.prevClose === null ? null : Number(b.prevClose),
     }))
-  );
+  ).filter((d) => !minExDate || d.exDate >= minExDate);
 
   if (detected.length === 0) return { detectedCount: 0, insertedCount: 0 };
 
@@ -84,14 +112,38 @@ async function processSymbol(db: DbClient, sym: { id: number; symbol: string }) 
 }
 
 async function main() {
-  const { exchange, target } = parseArgs();
-  const db: DbClient = target === "local" ? localDb : neonDb;
+  const { exchange, target, sinceDays } = parseArgs();
+  // Lazy: db/local.ts throws at import when LOCAL_DATABASE_URL is unset (always
+  // the case on GitHub Actions, which runs this with --db neon).
+  const db: DbClient = target === "local" ? (await import("../db/local")).localDb : neonDb;
   console.log(`Target: ${target}`);
 
   const symbolRows = await db
     .select({ id: symbols.id, symbol: symbols.symbol })
     .from(symbols)
     .where(eq(symbols.exchange, exchange));
+
+  // --since-days: one bulk fetch of recent bars, grouped per symbol in memory.
+  let recentBars: Map<number, BarForDetection[]> | null = null;
+  let minExDate: string | undefined;
+  if (sinceDays !== null) {
+    const addDays = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    minExDate = addDays(sinceDays);
+    const contextFrom = addDays(sinceDays + 10);
+    const rows = await db
+      .select({ symbolId: dailyBars.symbolId, date: dailyBars.date, close: dailyBars.close, prevClose: dailyBars.prevClose })
+      .from(dailyBars)
+      .innerJoin(symbols, eq(symbols.id, dailyBars.symbolId))
+      .where(and(eq(symbols.exchange, exchange), gte(dailyBars.date, contextFrom)))
+      .orderBy(asc(dailyBars.symbolId), asc(dailyBars.date));
+    recentBars = new Map();
+    for (const r of rows) {
+      const list = recentBars.get(r.symbolId) ?? [];
+      list.push({ date: r.date, close: r.close, prevClose: r.prevClose });
+      recentBars.set(r.symbolId, list);
+    }
+    console.log(`--since-days ${sinceDays}: ex-dates on/after ${minExDate}, ${rows.length} recent bars loaded in one query`);
+  }
 
   console.log(`Scanning ${symbolRows.length} ${exchange} symbols for corporate actions`);
 
@@ -101,7 +153,12 @@ async function main() {
 
   for (const [i, sym] of symbolRows.entries()) {
     try {
-      const { detectedCount, insertedCount } = await processSymbol(db, sym);
+      const { detectedCount, insertedCount } = await processSymbol(
+        db,
+        sym,
+        recentBars ? (recentBars.get(sym.id) ?? []) : undefined,
+        minExDate
+      );
       candidatesFound += detectedCount;
       candidatesInserted += insertedCount;
     } catch (e) {

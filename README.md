@@ -86,12 +86,32 @@ npm run backfill -- --exchange NSE --from 2021-09-21 --db neon
 
 ## Daily ingestion
 
-`npm run ingest:daily` ingests one date (today by default, or `-- --date YYYY-MM-DD`)
-for both exchanges, writing **only to Neon**, filtered to whatever's already
-flagged liquid there. This is what `.github/workflows/daily-ingest.yml` runs
-on a schedule (14:00 UTC / 19:30 IST, weekdays) — set the `DATABASE_URL`
-secret in the GitHub repo settings for it to work. It cannot and does not
-touch local Postgres.
+`npm run ingest:daily` is **self-healing**: it ingests every weekday since the
+last successful date that isn't already resolved in `ingestion_log`, so a
+missed run fixes itself on the next one. NSE only by default (`-- --exchange
+BSE` for the paused BSE path); `-- --date YYYY-MM-DD` forces a single date;
+`-- --dry-run` prints the plan and writes nothing. It writes **only to Neon**,
+filtered to whatever's already flagged liquid there. This is what
+`.github/workflows/daily-ingest.yml` runs on a schedule (14:00 UTC / 19:30 IST,
+weekdays), followed by corporate-action detection (`detect-actions --db neon
+--since-days 10`) and the scan — set the `DATABASE_URL` secret in the GitHub
+repo settings for it to work. It cannot and does not touch local Postgres.
+
+**Catching up manually** (after an outage, or to test locally — run from a
+network that can reach NSE; this is the same code the workflow runs):
+
+```bash
+npm run ingest:daily -- --dry-run                                   # 1. preview the dates
+npm run ingest:daily                                                # 2. ingest them into Neon (a few seconds per date)
+npm run detect-actions -- --exchange NSE --db neon --since-days 30  # 3. catch splits/bonuses in the gap
+npm run scan -- --exchange NSE                                      # 4. recompute signals
+```
+
+Then review any new candidates at `/admin` — unconfirmed detections are applied
+but flagged. To also keep the local full archive current:
+`npm run backfill -- --exchange NSE --from <first missing date>` (defaults to
+local, resumable). Failed dates are recorded with their error in `ingestion_log`
+(visible in `/admin`) and retried automatically on the next run.
 
 ## Corporate action detection
 

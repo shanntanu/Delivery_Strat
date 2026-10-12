@@ -6,7 +6,6 @@
 //   npm run scan -- --exchange NSE
 //   npm run scan -- --exchange BSE --db local   (dry-run against the full local archive)
 import "dotenv/config";
-import { localDb } from "../db/local";
 import { db as neonDb } from "../db";
 import { runScan } from "../lib/scan-runner";
 import type { DbClient } from "../lib/ingest/db-client";
@@ -25,7 +24,9 @@ function parseArgs() {
 
 async function main() {
   const { exchange, target } = parseArgs();
-  const db: DbClient = target === "local" ? localDb : neonDb;
+  // Lazy: db/local.ts throws at import when LOCAL_DATABASE_URL is unset (always
+  // the case on GitHub Actions) — see the same note in scripts/tune.ts.
+  const db: DbClient = target === "local" ? (await import("../db/local")).localDb : neonDb;
   console.log(`Scanning ${exchange} against ${target}`);
 
   const summary = await runScan(db, exchange, (p) => {

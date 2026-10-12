@@ -6,6 +6,12 @@ on:
     - cron: "0 14 * * 1-5"
   workflow_dispatch: {}
 
+# Shared with weekly-tune.yml: the scan and the tuner both delete/rewrite the
+# same `signals` rows, so they must never run at the same time.
+concurrency:
+  group: neon-writes
+  cancel-in-progress: false
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -15,22 +21,32 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+
+      # Self-healing: ingests every weekday since the last success that isn't
+      # already resolved in ingestion_log, not just "today" — see the header
+      # of scripts/ingest-daily.ts. NSE only (BSE paused, CLAUDE.md §13).
       - run: npm run ingest:daily
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # CLAUDE.md §6: an unadjusted split silently corrupts every ratio, so
+      # detection runs right after ingestion, before the scan reads the bars.
+      # --since-days keeps it cheap (one bulk query, not 1,850 full-history
+      # reads). Candidates land unconfirmed; review them at /admin.
+      - run: npm run detect-actions -- --exchange NSE --db neon --since-days 10
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
       # CLAUDE.md §12 point 6: ingestion is followed by the scan. Originally
       # measured at ~75-80 minutes for the full NSE liquid universe (1,857
       # symbols) against Neon, run fully sequentially. lib/scan-runner.ts now
       # scans SCAN_CONCURRENCY (6) symbols at once — Neon's HTTP driver has
       # no per-connection state to protect, so this is safe — which should
       # cut wall-clock meaningfully, though it hasn't been re-measured
-      # end-to-end against the full universe (that run alone costs real
-      # Actions minutes / wall time to verify). Comfortably under GitHub's
-      # per-job time limit either way, but worth knowing if you're on a
-      # private repo's free Actions minutes budget (2,000 min/month) — the
+      # end-to-end against the full universe. Worth knowing on a private
+      # repo's free Actions minutes budget (2,000 min/month): the
       # pre-concurrency figure alone was roughly 1,600-1,800 min/month
-      # running daily on weekdays. See .github/workflows/weekly-tune.yml's
-      # header comment for the other half of this budget conversation.
+      # running daily on weekdays. See weekly-tune.yml for the other half.
       - run: npm run scan -- --exchange NSE
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -10,7 +10,6 @@
 // the tuner has nothing to tune otherwise (see tuneSymbol's early-return in
 // lib/tuner-runner.ts).
 import "dotenv/config";
-import { localDb } from "../db/local";
 import { db as neonDb } from "../db";
 import { runTuner } from "../lib/tuner-runner";
 import type { DbClient } from "../lib/ingest/db-client";
@@ -29,7 +28,10 @@ function parseArgs() {
 
 async function main() {
   const { exchange, target } = parseArgs();
-  const db: DbClient = target === "local" ? localDb : neonDb;
+  // Lazy: db/local.ts throws at import when LOCAL_DATABASE_URL is unset, which
+  // is always the case on GitHub Actions. A top-level import made every
+  // scheduled run die before doing any work.
+  const db: DbClient = target === "local" ? (await import("../db/local")).localDb : neonDb;
   console.log(`Tuning ${exchange} against ${target}`);
 
   const summary = await runTuner(db, exchange, (p) => {

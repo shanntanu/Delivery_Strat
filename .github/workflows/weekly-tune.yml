@@ -23,6 +23,11 @@ on:
     - cron: "0 16 * * 6"
   workflow_dispatch: {}
 
+# Shared with daily-ingest.yml — see the note there.
+concurrency:
+  group: neon-writes
+  cancel-in-progress: false
+
 jobs:
   tune:
     runs-on: ubuntu-latest
